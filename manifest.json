@@ -1,0 +1,13 @@
+{
+    "display_name": "Better Vectors",
+    "loading_order": 200,
+    "requires": [],
+    "optional": ["vectors"],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "your insomnia & claude code",
+    "version": "1.0.0",
+    "description": "Enhances Vector Storage: groups chunks by source file with metadata headers (filename, date), smarter chunk boundaries, structured injection formatting.",
+    "homePage": "",
+    "auto_update": false
+}

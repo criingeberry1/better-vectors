@@ -1,0 +1,71 @@
+<div class="better-vectors-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Better Vectors</b>
+            <span id="bv_status" class="bv-status-badge">...</span>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="flex-container flexFlowColumn">
+                <small class="bv-description">
+                    Enhances Data Bank injection: groups chunks by source file, parses dates from filenames, and formats structured prompts instead of a random dump. Does not replace Vector Storage — hooks into it.
+                </small>
+
+                <hr class="bv-separator">
+
+                <label class="checkbox_label" for="bv_enabled">
+                    <input id="bv_enabled" type="checkbox" class="checkbox">
+                    <span>Enable Better Vectors</span>
+                </label>
+
+                <hr class="bv-separator">
+                <h4 class="bv-section-title">Features</h4>
+
+                <label class="checkbox_label" for="bv_inject_file_headers" title="Add a header line above each file's chunks showing the filename and date">
+                    <input id="bv_inject_file_headers" type="checkbox" class="checkbox">
+                    <span>Inject file headers</span>
+                </label>
+
+                <label class="checkbox_label" for="bv_parse_dates" title="Attempt to parse dates from filenames like 2024-03-15_event.txt">
+                    <input id="bv_parse_dates" type="checkbox" class="checkbox">
+                    <span>Parse dates from filenames</span>
+                </label>
+
+                <label class="checkbox_label" for="bv_sort_by_date" title="Sort file sections chronologically (earliest first)">
+                    <input id="bv_sort_by_date" type="checkbox" class="checkbox">
+                    <span>Sort sections by date</span>
+                </label>
+
+                <label class="checkbox_label" for="bv_debug_log" title="Print debug info to browser console (F12)">
+                    <input id="bv_debug_log" type="checkbox" class="checkbox">
+                    <span>Debug logging</span>
+                </label>
+
+                <hr class="bv-separator">
+                <h4 class="bv-section-title">Templates</h4>
+
+                <label for="bv_header_format">
+                    File header format
+                    <small class="bv-hint">Variables: <code>{{date}}</code> <code>{{filename}}</code></small>
+                </label>
+                <input id="bv_header_format" class="text_pole" type="text" placeholder="--- {{date}}{{filename}} ---">
+
+                <label for="bv_section_template">
+                    Section template (per file)
+                    <small class="bv-hint">Variables: <code>{{header}}</code> <code>{{chunks}}</code></small>
+                </label>
+                <textarea id="bv_section_template" class="text_pole" rows="2" placeholder="{{header}}\n{{chunks}}"></textarea>
+
+                <label for="bv_wrapper_template">
+                    Wrapper template (final prompt)
+                    <small class="bv-hint">Variables: <code>{{sections}}</code></small>
+                </label>
+                <textarea id="bv_wrapper_template" class="text_pole" rows="3" placeholder="[Relevant Lore]\n\n{{sections}}"></textarea>
+
+                <hr class="bv-separator">
+                <h4 class="bv-section-title">Preview</h4>
+                <pre id="bv_preview_output" class="bv-preview"></pre>
+            </div>
+        </div>
+    </div>
+</div>

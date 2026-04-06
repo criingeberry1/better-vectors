@@ -1,0 +1,50 @@
+/* Better Vectors — UI Styles */
+
+.better-vectors-settings {
+    margin-top: 4px;
+}
+
+.better-vectors-settings .inline-drawer-header b {
+    font-size: 1em;
+}
+
+.better-vectors-settings .bv-desc {
+    opacity: 0.7;
+    line-height: 1.4;
+    margin-bottom: 4px;
+}
+
+.better-vectors-settings .bv-hint {
+    display: block;
+    opacity: 0.6;
+    font-size: 0.85em;
+    margin-top: 2px;
+}
+
+.better-vectors-settings .bv-hint code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.better-vectors-settings hr {
+    margin: 8px 0;
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.better-vectors-settings textarea.text_pole {
+    resize: vertical;
+    min-height: 40px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.better-vectors-settings input.text_pole[type="text"] {
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.better-vectors-settings .menu_button_icon {
+    margin-right: 6px;
+}
