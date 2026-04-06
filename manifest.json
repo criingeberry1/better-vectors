@@ -2,7 +2,7 @@
     "display_name": "Better Vectors",
     "loading_order": 200,
     "requires": [],
-    "optional": ["vectors"],
+    "optional": [],
     "js": "index.js",
     "css": "style.css",
     "author": "your insomnia & claude code",
