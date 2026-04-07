@@ -1,350 +1,361 @@
 /**
- * Better Vectors — Enhanced Vector Storage for SillyTavern
- *
- * Minimal hook: intercepts the fetch response from /api/vector/query-multi
- * that the ORIGINAL Vector Storage already makes, captures per-file chunk data,
- * then reformats the Data Bank prompt with file headers and grouping.
- *
- * Does NOT reimplement any vectorization, querying, or API logic.
+ * Better Vectors v1.4.0
+ * IIFE pattern. Intercepts query-multi response to reformat Data Bank prompt
+ * with per-file grouping and headers (dates, filenames).
  *
  * @author your insomnia & claude code
- * @version 1.1.0
  */
-import {
-    saveSettingsDebounced,
-    setExtensionPrompt,
-    substituteParamsExtended,
-} from '../../../../script.js';
-import {
-    extension_settings,
-    renderExtensionTemplateAsync,
-} from '../../../extensions.js';
-import { getDataBankAttachments } from '../../../chats.js';
-import { getStringHash as calculateHash, onlyUnique } from '../../../utils.js';
+(function () {
+    'use strict';
 
-// ─── Constants ──────────────────────────────────────────────────────────────────
-const MODULE_NAME = 'better-vectors';
-const EXTENSION_PROMPT_TAG_DB = '4_vectors_data_bank';
-const LOG = '[BetterVectors]';
+    const MODULE_NAME = 'better-vectors';
+    const EXTENSION_PROMPT_TAG_DB = '4_vectors_data_bank';
+    const LOG = '[BetterVectors]';
 
-// ─── Default Settings ───────────────────────────────────────────────────────────
-const defaultSettings = {
-    enabled: true,
-    inject_file_headers: true,
-    parse_dates: true,
-    sort_by_date: false,
-    header_format: '--- {{date}}{{filename}} ---',
-    section_template: '{{header}}\n{{chunks}}',
-    wrapper_template: '[Relevant Lore]\n\n{{sections}}',
-    debug_log: false,
-};
+    const defaultSettings = {
+        enabled: true,
+        inject_file_headers: true,
+        parse_dates: true,
+        sort_by_date: true,
+        header_format: '--- {{date}}{{filename}} ---',
+        section_template: '{{header}}\n{{chunks}}',
+        wrapper_template: '[Relevant Lore]\n\n{{sections}}',
+        debug_log: false,
+    };
 
-// ─── Captured data from the original's fetch call ───────────────────────────────
-let capturedQueryMultiResult = null;
+    let capturedQueryMultiResult = null;
+    let originalRearrangeChat = null;
+    let hooked = false;
 
-// ─── Hash helper (mirrors original) ─────────────────────────────────────────────
-const hashCache = new Map();
-function getStringHash(str) {
-    if (hashCache.has(str)) return hashCache.get(str);
-    const h = calculateHash(str);
-    hashCache.set(str, h);
-    return h;
-}
-
-function getFileCollectionId(fileUrl) {
-    return `file_${getStringHash(fileUrl)}`;
-}
-
-// ─── Date Parsing ───────────────────────────────────────────────────────────────
-function parseDateFromFilename(filename, createdTimestamp) {
-    const base = filename.replace(/\.[^.]+$/, '');
-
-    // YYYY-MM-DD / YYYY.MM.DD / YYYY_MM_DD
-    const iso = base.match(/(\d{4})[-._](\d{1,2})[-._](\d{1,2})/);
-    if (iso) {
-        const [full, y, m, d] = iso;
-        const dateStr = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-        const clean = base.replace(full, '').replace(/^[-_.\s]+|[-_.\s]+$/g, '').trim();
-        return { dateStr, cleanName: clean || base };
+    // ─── Context ────────────────────────────────────────────────────────────
+    function ctx() {
+        try { return SillyTavern.getContext(); }
+        catch (e) { return null; }
     }
 
-    // DD-MM-YYYY / DD.MM.YYYY
-    const eu = base.match(/(\d{1,2})[-._](\d{1,2})[-._](\d{4})/);
-    if (eu) {
-        const [full, d, m, y] = eu;
-        const dateStr = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-        const clean = base.replace(full, '').replace(/^[-_.\s]+|[-_.\s]+$/g, '').trim();
-        return { dateStr, cleanName: clean || base };
+    function getSettings() {
+        try {
+            const c = ctx();
+            if (!c) return Object.assign({}, defaultSettings);
+            if (!c.extensionSettings[MODULE_NAME]) {
+                c.extensionSettings[MODULE_NAME] = Object.assign({}, defaultSettings);
+            }
+            return c.extensionSettings[MODULE_NAME];
+        } catch (e) { return Object.assign({}, defaultSettings); }
     }
 
-    // Fallback: file creation timestamp
-    if (createdTimestamp) {
-        const dt = new Date(createdTimestamp);
-        if (!isNaN(dt.getTime())) {
-            return { dateStr: dt.toISOString().split('T')[0], cleanName: base };
+    function saveSettings() {
+        try { ctx()?.saveSettingsDebounced(); } catch (e) { /* */ }
+    }
+
+    // ─── Date Parsing ───────────────────────────────────────────────────────
+    function parseDateFromFilename(filename, created) {
+        const base = filename.replace(/\.[^.]+$/, '');
+
+        const iso = base.match(/(\d{4})[-._](\d{1,2})[-._](\d{1,2})/);
+        if (iso) {
+            const [full, y, m, d] = iso;
+            const ds = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+            const clean = base.replace(full, '').replace(/^[-_.\s]+|[-_.\s]+$/g, '').trim();
+            return { dateStr: ds, cleanName: clean || base };
         }
-    }
 
-    return { dateStr: null, cleanName: base };
-}
-
-// ─── Fetch Interceptor ─────────────────────────────────────────────────────────
-const originalFetch = window.fetch.bind(window);
-
-async function interceptedFetch(input, init) {
-    const response = await originalFetch(input, init);
-    const s = getSettings();
-
-    // Only intercept if we're enabled
-    if (!s.enabled) return response;
-
-    // Check if this is the query-multi call
-    const url = typeof input === 'string' ? input : input?.url || '';
-    if (!url.includes('/api/vector/query-multi')) return response;
-
-    try {
-        // Clone response so original consumer still gets data
-        const cloned = response.clone();
-        const data = await cloned.json();
-        capturedQueryMultiResult = data;
-
-        if (s.debug_log) {
-            console.debug(`${LOG} Captured query-multi response:`, Object.keys(data));
+        const eu = base.match(/(\d{1,2})[-._](\d{1,2})[-._](\d{4})/);
+        if (eu) {
+            const [full, d, m, y] = eu;
+            const ds = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+            const clean = base.replace(full, '').replace(/^[-_.\s]+|[-_.\s]+$/g, '').trim();
+            return { dateStr: ds, cleanName: clean || base };
         }
-    } catch (e) {
-        console.warn(`${LOG} Failed to capture query-multi response`, e);
+
+        if (created) {
+            const dt = new Date(created);
+            if (!isNaN(dt.getTime())) {
+                return { dateStr: dt.toISOString().split('T')[0], cleanName: base };
+            }
+        }
+
+        return { dateStr: null, cleanName: base };
     }
 
-    return response;
-}
-
-// ─── File metadata map ──────────────────────────────────────────────────────────
-function buildFileMetadataMap() {
-    const dataBank = getDataBankAttachments(false);
-    const map = new Map();
-    for (const file of dataBank) {
-        const cid = getFileCollectionId(file.url);
-        const { dateStr, cleanName } = parseDateFromFilename(file.name, file.created);
-        map.set(cid, { name: file.name, dateStr, cleanName });
-    }
-    return map;
-}
-
-// ─── Format header ──────────────────────────────────────────────────────────────
-function formatFileHeader(meta) {
-    const s = getSettings();
-    if (!s.inject_file_headers) return '';
-
-    let header = s.header_format;
-    const datePart = (s.parse_dates && meta.dateStr) ? `${meta.dateStr} | ` : '';
-    header = header.replace('{{date}}', datePart);
-    header = header.replace('{{filename}}', meta.cleanName || meta.name);
-    return header;
-}
-
-// ─── Build the enhanced prompt from captured data ───────────────────────────────
-function buildEnhancedPrompt() {
-    const s = getSettings();
-
-    if (!capturedQueryMultiResult) {
-        if (s.debug_log) console.debug(`${LOG} No captured data to enhance`);
-        return null;
+    // ─── File Metadata (from Data Bank attachments via context) ─────────────
+    function getStringHash(str) {
+        try {
+            const c = ctx();
+            if (c && typeof c.getStringHash === 'function') return c.getStringHash(str);
+        } catch (e) { /* */ }
+        let h = 5381;
+        for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) & 0xFFFFFFFF;
+        return h;
     }
 
-    const fileMetaMap = buildFileMetadataMap();
-    const fileSections = [];
-
-    for (const [collectionId, result] of Object.entries(capturedQueryMultiResult)) {
-        if (!result?.metadata) continue;
-
-        const chunks = result.metadata
-            .filter(x => x.text)
-            .sort((a, b) => a.index - b.index)
-            .map(x => x.text)
-            .filter(onlyUnique);
-
-        if (chunks.length === 0) continue;
-
-        const meta = fileMetaMap.get(collectionId);
-
-        // If we don't have metadata for this collection, it's a per-message file
-        // attachment (not Data Bank) — skip, let original handle it
-        if (!meta) continue;
-
-        const header = formatFileHeader(meta);
-        const chunkText = chunks.join('\n');
-
-        let section = s.section_template;
-        section = section.replace('{{header}}', header);
-        section = section.replace('{{chunks}}', chunkText);
-
-        fileSections.push({
-            section: section.trim(),
-            dateStr: meta.dateStr,
-            name: meta.name,
-        });
+    function getFileCollectionId(url) {
+        return `file_${getStringHash(url)}`;
     }
 
-    if (fileSections.length === 0) return null;
-
-    if (s.sort_by_date) {
-        fileSections.sort((a, b) => {
-            if (a.dateStr && b.dateStr) return a.dateStr.localeCompare(b.dateStr);
-            if (a.dateStr) return -1;
-            if (b.dateStr) return 1;
-            return a.name.localeCompare(b.name);
-        });
+    function getDataBankFiles() {
+        try {
+            const c = ctx();
+            if (!c) return [];
+            const g = c.extensionSettings?.attachments ?? [];
+            const ch = c.chatMetadata?.attachments ?? [];
+            let ca = [];
+            try {
+                const av = c.characters?.[c.characterId]?.avatar;
+                if (av) ca = c.extensionSettings?.character_attachments?.[av] ?? [];
+            } catch (e) { /* */ }
+            return [...g, ...ch, ...ca].filter(x => !x.disabled);
+        } catch (e) { return []; }
     }
 
-    const sectionsText = fileSections.map(x => x.section).join('\n\n');
-    return s.wrapper_template.replace('{{sections}}', sectionsText);
-}
-
-// ─── Monkey-patch rearrangeChat ─────────────────────────────────────────────────
-let originalRearrangeChat = null;
-
-async function betterRearrangeChat(chat, contextSize, abort, type) {
-    const s = getSettings();
-
-    // Reset captured data before original runs
-    capturedQueryMultiResult = null;
-
-    // Let the original do ALL the work — vectorization, querying, injection
-    if (typeof originalRearrangeChat === 'function') {
-        await originalRearrangeChat(chat, contextSize, abort, type);
+    function buildFileMetadataMap() {
+        const map = new Map();
+        for (const f of getDataBankFiles()) {
+            const cid = getFileCollectionId(f.url);
+            const { dateStr, cleanName } = parseDateFromFilename(f.name, f.created);
+            map.set(cid, { name: f.name, dateStr, cleanName });
+        }
+        return map;
     }
 
-    // If disabled or quiet, stop here — original result stands
-    if (!s.enabled || type === 'quiet') return;
+    // ─── Format ─────────────────────────────────────────────────────────────
+    function formatFileHeader(meta) {
+        const s = getSettings();
+        if (!s.inject_file_headers) return '';
+        let h = s.header_format;
+        const dp = (s.parse_dates && meta.dateStr) ? `${meta.dateStr} | ` : '';
+        h = h.replace('{{date}}', dp);
+        h = h.replace('{{filename}}', meta.cleanName || meta.name);
+        return h;
+    }
 
-    try {
-        // Build enhanced prompt from the data we captured during original's fetch
-        const enhanced = buildEnhancedPrompt();
+    function buildEnhancedPrompt() {
+        const s = getSettings();
+        if (!capturedQueryMultiResult) return null;
 
-        if (enhanced) {
-            // Read injection position from the original's settings
-            const vs = extension_settings.vectors || {};
-            setExtensionPrompt(
+        const fileMetaMap = buildFileMetadataMap();
+        if (fileMetaMap.size === 0) {
+            if (s.debug_log) console.debug(LOG, 'No file metadata');
+            return null;
+        }
+
+        const sections = [];
+        for (const [cid, result] of Object.entries(capturedQueryMultiResult)) {
+            if (!result?.metadata) continue;
+            const chunks = result.metadata
+                .filter(x => x.text)
+                .sort((a, b) => a.index - b.index)
+                .map(x => x.text)
+                .filter((v, i, a) => a.indexOf(v) === i);
+            if (!chunks.length) continue;
+
+            const meta = fileMetaMap.get(cid);
+            if (!meta) continue;
+
+            const header = formatFileHeader(meta);
+            let sec = s.section_template
+                .replace('{{header}}', header)
+                .replace('{{chunks}}', chunks.join('\n'));
+
+            sections.push({ section: sec.trim(), dateStr: meta.dateStr, name: meta.name });
+        }
+
+        if (!sections.length) return null;
+
+        if (s.sort_by_date) {
+            sections.sort((a, b) => {
+                if (a.dateStr && b.dateStr) return a.dateStr.localeCompare(b.dateStr);
+                if (a.dateStr) return -1;
+                if (b.dateStr) return 1;
+                return a.name.localeCompare(b.name);
+            });
+        }
+
+        const text = sections.map(x => x.section).join('\n\n');
+        return s.wrapper_template.replace('{{sections}}', text);
+    }
+
+    // ─── Fetch Intercept ────────────────────────────────────────────────────
+    // Save a direct reference to the REAL fetch ONCE at load time
+    const _realFetch = window.fetch;
+
+    function installFetchIntercept() {
+        window.fetch = function betterVectorsFetch(input, init) {
+            // ALWAYS use the real fetch — never recurse
+            const promise = _realFetch.apply(window, arguments);
+
+            // Only attempt interception if enabled
+            try {
+                const s = getSettings();
+                if (!s.enabled) return promise;
+
+                const url = typeof input === 'string' ? input
+                    : (input instanceof Request) ? input.url : '';
+
+                if (url.includes('/api/vector/query-multi')) {
+                    // Return a chained promise that captures the response
+                    return promise.then(function (response) {
+                        // Clone BEFORE anyone reads the body
+                        const cloned = response.clone();
+                        // Read clone in background — don't await, don't block
+                        cloned.json().then(function (data) {
+                            capturedQueryMultiResult = data;
+                            if (s.debug_log) {
+                                console.debug(LOG, 'Captured query-multi:', Object.keys(data));
+                            }
+                        }).catch(function () { /* silent */ });
+                        // Return original untouched
+                        return response;
+                    });
+                }
+            } catch (e) {
+                // Never break fetch
+            }
+
+            return promise;
+        };
+
+        console.log(LOG, 'Fetch intercept installed');
+    }
+
+    // ─── Hook rearrangeChat ─────────────────────────────────────────────────
+    async function betterRearrangeChat(chat, contextSize, abort, type) {
+        capturedQueryMultiResult = null;
+
+        // ALWAYS call original — re-throw errors
+        if (typeof originalRearrangeChat === 'function') {
+            await originalRearrangeChat(chat, contextSize, abort, type);
+        }
+
+        // Our enhancement — fully wrapped
+        try {
+            const s = getSettings();
+            if (!s.enabled || type === 'quiet') return;
+
+            const enhanced = buildEnhancedPrompt();
+            if (!enhanced) {
+                if (s.debug_log) console.debug(LOG, 'No enhanced prompt built');
+                return;
+            }
+
+            const c = ctx();
+            if (!c || typeof c.setExtensionPrompt !== 'function') return;
+
+            const vs = c.extensionSettings?.vectors || {};
+            c.setExtensionPrompt(
                 EXTENSION_PROMPT_TAG_DB,
                 enhanced,
-                vs.file_position_db,
-                vs.file_depth_db,
-                vs.include_wi,
-                vs.file_depth_role_db,
+                vs.file_position_db ?? 0,
+                vs.file_depth_db ?? 4,
+                vs.include_wi ?? false,
+                vs.file_depth_role_db ?? 0,
             );
 
             if (s.debug_log) {
-                console.log(`${LOG} Overwrote Data Bank prompt with enhanced formatting`);
+                console.log(LOG, 'Enhanced DB prompt injected:\n', enhanced.substring(0, 500));
             }
+        } catch (e) {
+            console.warn(LOG, 'Enhancement failed (non-fatal):', e.message);
         }
-    } catch (error) {
-        // If anything fails, original injection is still in place
-        console.error(`${LOG} Enhancement failed, original prompt preserved`, error);
-    }
-}
-
-// ─── Settings ───────────────────────────────────────────────────────────────────
-function getSettings() {
-    if (!extension_settings[MODULE_NAME]) {
-        extension_settings[MODULE_NAME] = Object.assign({}, defaultSettings);
-    }
-    return extension_settings[MODULE_NAME];
-}
-
-function saveSettings() {
-    Object.assign(extension_settings[MODULE_NAME], getSettings());
-    saveSettingsDebounced();
-}
-
-async function loadSettingsUI() {
-    const s = getSettings();
-    const html = await renderExtensionTemplateAsync(`third-party/${MODULE_NAME}`, 'settings');
-    $('#extensions_settings').append(html);
-
-    // -- Checkboxes --
-    const checkboxes = {
-        '#bv_enabled': 'enabled',
-        '#bv_inject_file_headers': 'inject_file_headers',
-        '#bv_parse_dates': 'parse_dates',
-        '#bv_sort_by_date': 'sort_by_date',
-        '#bv_debug_log': 'debug_log',
-    };
-
-    for (const [sel, key] of Object.entries(checkboxes)) {
-        $(sel).prop('checked', s[key]).on('change', function () {
-            s[key] = !!$(this).prop('checked');
-            saveSettings();
-            if (key === 'enabled') updateStatusIndicator();
-        });
     }
 
-    // -- Text inputs --
-    const textInputs = {
-        '#bv_header_format': 'header_format',
-        '#bv_section_template': 'section_template',
-        '#bv_wrapper_template': 'wrapper_template',
-    };
+    function tryHook() {
+        if (hooked) return true;
+        if (typeof globalThis.vectors_rearrangeChat !== 'function') return false;
 
-    for (const [sel, key] of Object.entries(textInputs)) {
-        $(sel).val(s[key]).on('input', function () {
-            s[key] = String($(this).val());
-            saveSettings();
-            updatePreview();
-        });
-    }
-
-    updateStatusIndicator();
-    updatePreview();
-}
-
-function updateStatusIndicator() {
-    const s = getSettings();
-    const $el = $('#bv_status');
-    if (s.enabled) {
-        $el.text('Active').removeClass('bv-inactive').addClass('bv-active');
-    } else {
-        $el.text('Inactive').removeClass('bv-active').addClass('bv-inactive');
-    }
-}
-
-function updatePreview() {
-    const s = getSettings();
-    const sampleMeta = { name: '2024-06-15_tavern_battle.txt', dateStr: '2024-06-15', cleanName: 'tavern_battle' };
-    const header = formatFileHeader(sampleMeta);
-
-    let section = s.section_template;
-    section = section.replace('{{header}}', header);
-    section = section.replace('{{chunks}}', 'The heroes fought bravely in the tavern...');
-
-    let wrapper = s.wrapper_template;
-    wrapper = wrapper.replace('{{sections}}', section.trim());
-    $('#bv_preview_output').text(wrapper);
-}
-
-// ─── Init ───────────────────────────────────────────────────────────────────────
-jQuery(async () => {
-    await loadSettingsUI();
-
-    // Install fetch interceptor
-    window.fetch = interceptedFetch;
-    console.log(`${LOG} Fetch interceptor installed`);
-
-    // Wait for the original Vector Storage to register its rearrangeChat
-    const deadline = Date.now() + 15000;
-    while (!globalThis.vectors_rearrangeChat && Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 250));
-    }
-
-    if (typeof globalThis.vectors_rearrangeChat === 'function') {
         originalRearrangeChat = globalThis.vectors_rearrangeChat;
         globalThis.vectors_rearrangeChat = betterRearrangeChat;
-        console.log(`${LOG} Hooked into Vector Storage (rearrangeChat)`);
-    } else {
-        console.warn(`${LOG} Vector Storage not found — extension inactive`);
-        toastr.warning(
-            'Better Vectors requires the built-in Vector Storage extension. Enable it first.',
-            'Better Vectors',
-            { timeOut: 8000 },
-        );
+        hooked = true;
+        console.log(LOG, 'Hooked into vectors_rearrangeChat');
+        return true;
     }
-});
+
+    // ─── Settings UI ────────────────────────────────────────────────────────
+    function loadUI() {
+        const s = getSettings();
+        const html = `
+        <div class="better-vectors-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>Better Vectors</b>
+                    <span id="bv_status" style="font-size:0.75em;margin-left:6px;">...</span>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="flex-container flexFlowColumn">
+                        <small style="color:var(--SmartThemeQuoteColor);margin-bottom:6px;">
+                            Groups Data Bank chunks by source file with headers (filename + date). Hooks into Vector Storage — does not replace it.
+                        </small>
+                        <hr style="border:none;border-top:1px solid var(--SmartThemeBorderColor);margin:6px 0;">
+                        <label class="checkbox_label"><input id="bv_enabled" type="checkbox" class="checkbox"><span>Enable</span></label>
+                        <label class="checkbox_label"><input id="bv_inject_file_headers" type="checkbox" class="checkbox"><span>Inject file headers</span></label>
+                        <label class="checkbox_label"><input id="bv_parse_dates" type="checkbox" class="checkbox"><span>Parse dates from filenames</span></label>
+                        <label class="checkbox_label"><input id="bv_sort_by_date" type="checkbox" class="checkbox"><span>Sort by date</span></label>
+                        <label class="checkbox_label"><input id="bv_debug_log" type="checkbox" class="checkbox"><span>Debug log (console)</span></label>
+                        <hr style="border:none;border-top:1px solid var(--SmartThemeBorderColor);margin:6px 0;">
+                        <label>Header format <small style="color:var(--SmartThemeQuoteColor);">({{date}} {{filename}})</small></label>
+                        <input id="bv_header_format" class="text_pole" type="text">
+                        <label>Section template <small style="color:var(--SmartThemeQuoteColor);">({{header}} {{chunks}})</small></label>
+                        <textarea id="bv_section_template" class="text_pole" rows="2"></textarea>
+                        <label>Wrapper template <small style="color:var(--SmartThemeQuoteColor);">({{sections}})</small></label>
+                        <textarea id="bv_wrapper_template" class="text_pole" rows="3"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+
+        $('#extensions_settings').append(html);
+
+        const checks = {
+            '#bv_enabled': 'enabled',
+            '#bv_inject_file_headers': 'inject_file_headers',
+            '#bv_parse_dates': 'parse_dates',
+            '#bv_sort_by_date': 'sort_by_date',
+            '#bv_debug_log': 'debug_log',
+        };
+        for (const [sel, key] of Object.entries(checks)) {
+            $(sel).prop('checked', s[key]).on('change', function () {
+                getSettings()[key] = !!$(this).prop('checked');
+                saveSettings();
+                if (key === 'enabled') updateStatus();
+            });
+        }
+
+        const texts = { '#bv_header_format': 'header_format', '#bv_section_template': 'section_template', '#bv_wrapper_template': 'wrapper_template' };
+        for (const [sel, key] of Object.entries(texts)) {
+            $(sel).val(s[key]).on('input', function () {
+                getSettings()[key] = String($(this).val());
+                saveSettings();
+            });
+        }
+
+        updateStatus();
+    }
+
+    function updateStatus() {
+        const $el = $('#bv_status');
+        if (getSettings().enabled) {
+            $el.text('ON').css('color', '#4CAF50');
+        } else {
+            $el.text('OFF').css('color', '#ef5350');
+        }
+    }
+
+    // ─── Init ───────────────────────────────────────────────────────────────
+    function init() {
+        console.log(LOG, 'v1.4.0 init');
+        installFetchIntercept();
+        loadUI();
+
+        if (tryHook()) return;
+        let n = 0;
+        const poll = setInterval(() => {
+            if (tryHook() || ++n >= 60) {
+                clearInterval(poll);
+                if (n >= 60) console.warn(LOG, 'Vector Storage not found');
+            }
+        }, 250);
+    }
+
+    $(document).ready(() => setTimeout(init, 100));
+})();
