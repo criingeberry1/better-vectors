@@ -1,5 +1,5 @@
 /**
- * Better Vectors v1.4.0
+ * Better Vectors v1.4.1
  * IIFE pattern. Intercepts query-multi response to reformat Data Bank prompt
  * with per-file grouping and headers (dates, filenames).
  *
@@ -79,14 +79,19 @@
     }
 
     // ─── File Metadata (from Data Bank attachments via context) ─────────────
-    function getStringHash(str) {
-        try {
-            const c = ctx();
-            if (c && typeof c.getStringHash === 'function') return c.getStringHash(str);
-        } catch (e) { /* */ }
-        let h = 5381;
-        for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) & 0xFFFFFFFF;
-        return h;
+    // Must match ST's getStringHash from utils.js exactly (MurmurHash3 variant)
+    function getStringHash(str, seed) {
+        if (typeof str !== 'string') return 0;
+        seed = seed || 0;
+        let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+        for (let i = 0, ch; i < str.length; i++) {
+            ch = str.charCodeAt(i);
+            h1 = Math.imul(h1 ^ ch, 2654435761);
+            h2 = Math.imul(h2 ^ ch, 1597334677);
+        }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+        return 4294967296 * (2097151 & h2) + (h1 >>> 0);
     }
 
     function getFileCollectionId(url) {
@@ -343,7 +348,7 @@
 
     // ─── Init ───────────────────────────────────────────────────────────────
     function init() {
-        console.log(LOG, 'v1.4.0 init');
+        console.log(LOG, 'v1.4.1 init');
         installFetchIntercept();
         loadUI();
 
